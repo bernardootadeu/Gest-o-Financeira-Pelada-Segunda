@@ -11,7 +11,7 @@ from rapidfuzz import process, fuzz
 VERDE = "#458462"
 AMBAR = "#FFB743"
 
-st.set_page_config(page_title="Gestão Pelada & Churrasco", layout="wide")
+st.set_page_config(page_title="Gestão Pelada Segunda", layout="wide")
 
 # Funções de Carregamento de Dados
 def load_data():
@@ -36,7 +36,6 @@ def load_data():
         df_jogadores["Data_Evento"] = pd.to_datetime(df_jogadores["Data_Evento"])
         
     if not os.path.exists("jogadores_base.csv"):
-        # Se não existir, cria uma base vazia ou com os nomes que já conhecemos
         df_base = pd.DataFrame(columns=["Nome_Oficial"])
         df_base.to_csv("jogadores_base.csv", index=False)
     else:
@@ -49,27 +48,60 @@ def save_data(df_caixa, df_jogadores, df_base):
     df_jogadores.to_csv("historico_jogadores.csv", index=False)
     df_base.to_csv("jogadores_base.csv", index=False)
 
-# Inteligência de Reconhecimento de Nomes
+# Inteligência de Reconhecimento de Nomes e Listas
 def match_player_name(input_name, base_names):
     if not base_names:
         return input_name
-    # Tenta encontrar o melhor match acima de 70% de similaridade
-    match = process.extractOne(input_name.upper(), base_names, scorer=fuzz.token_sort_ratio)
+    # Limpar ruídos comuns antes do match
+    clean_name = re.sub(r'\(.*?\)', '', input_name) # Remove (viajando), (DM), etc
+    clean_name = re.sub(r'[\d\-\.\⭐️\✅]', '', clean_name).strip() # Remove números e emojis
+    
+    match = process.extractOne(clean_name.upper(), base_names, scorer=fuzz.token_sort_ratio)
     if match and match[1] >= 70:
         return match[0]
-    return input_name.upper()
+    return clean_name.upper()
+
+def extract_value_from_text(text):
+    # Procura por R$XX,XX ou R$ XX,XX
+    match = re.search(r'R\$\s?(\d+,\d{2})', text)
+    if match:
+        return float(match.group(1).replace(',', '.'))
+    return None
 
 def process_whatsapp_list(text, base_names):
     lines = text.split('\n')
     players = []
+    
+    # Flags para ignorar seções irrelevantes
+    ignorar_secao = False
+    palavras_parada = ["LISTA DE ESPERA", "AUSENTES", "GK -"]
+    
     for line in lines:
-        if line.strip():
-            clean_line = re.sub(r'^\d+[\s\.\-\)]*', '', line).strip()
-            has_check = "✅" in clean_line
-            raw_name = clean_line.replace("✅", "").strip()
-            if raw_name:
+        upper_line = line.upper().strip()
+        
+        # Se encontrar uma palavra de parada, para de processar nomes
+        if any(p in upper_line for p in palavras_parada):
+            ignorar_secao = True
+            continue
+            
+        if ignorar_secao:
+            continue
+            
+        # Verifica se a linha parece um nome (geralmente começa com número ou tem nome)
+        # Ignora linhas de cabeçalho, PIX, CPF, etc
+        if re.match(r'^\d+[\s\.\-\)]+', line.strip()) or (line.strip() and not any(x in upper_line for x in ["PIX", "CPF", "R$", "HORÁRIO", "ATENÇÃO", "QUADRA"])):
+            has_check = "✅" in line
+            # Remove numeração inicial e emojis
+            raw_name = re.sub(r'^\d+[\s\.\-\)]*', '', line).strip()
+            raw_name = raw_name.replace("✅", "").strip()
+            
+            # Remove observações entre parênteses ou após traço (ex: Rapha - trabalho)
+            raw_name = re.split(r'[\(\-\–]', raw_name)[0].strip()
+            
+            if raw_name and len(raw_name) > 2:
                 official_name = match_player_name(raw_name, base_names)
                 players.append({"Nome": official_name, "Confirmado": has_check, "Nome_Original": raw_name})
+    
     return players
 
 def process_csv_extract(file_content):
@@ -112,21 +144,27 @@ if menu == "Lançamento Semanal":
     
     with col1:
         st.subheader("📋 Lista da Pelada")
-        wa_pelada = st.text_area("Cole a lista da PELADA aqui...", height=150)
+        wa_pelada = st.text_area("Cole a lista da PELADA aqui...", height=250)
+        val_pelada_sugerido = extract_value_from_text(wa_pelada) or 20.0
         players_pelada = process_whatsapp_list(wa_pelada, base_names) if wa_pelada else []
         if players_pelada:
-            st.info(f"{len(players_pelada)} na pelada.")
+            st.info(f"{len(players_pelada)} jogadores identificados na lista principal.")
+            with st.expander("Ver nomes identificados"):
+                for p in players_pelada:
+                    status = "✅" if p['Confirmado'] else "❌"
+                    st.write(f"{status} {p['Nome']} (Original: {p['Nome_Original']})")
             
         st.subheader("🍖 Lista do Churrasco")
-        wa_churras = st.text_area("Cole a lista do CHURRASCO aqui...", height=150)
+        wa_churras = st.text_area("Cole a lista do CHURRASCO aqui...", height=200)
+        val_churras_sugerido = extract_value_from_text(wa_churras) or 25.0
         players_churras = process_whatsapp_list(wa_churras, base_names) if wa_churras else []
         if players_churras:
             st.info(f"{len(players_churras)} no churrasco.")
 
     with col2:
         st.subheader("💰 Valores e Custos")
-        v_pelada = st.number_input("Valor Individual Pelada (R$)", value=20.0)
-        v_churras = st.number_input("Valor Individual Churrasco (R$)", value=5.0)
+        v_pelada = st.number_input("Valor Individual Pelada (R$)", value=val_pelada_sugerido)
+        v_churras = st.number_input("Valor Individual Churrasco (R$)", value=val_churras_sugerido)
         
         st.divider()
         aluguel = st.number_input("Aluguel da Quadra (Saída)", value=270.0)
@@ -136,19 +174,21 @@ if menu == "Lançamento Semanal":
         st.subheader("🔍 Auditoria (Extrato)")
         uploaded_file = st.file_uploader("Upload do CSV do Banco", type="csv")
         if uploaded_file:
-            df_ext = process_csv_extract(uploaded_file.read())
-            if not df_ext.empty:
-                pix_counts = df_ext[df_ext['Histórico'].str.contains('PIX', na=False)]['Crédito (R$)'].value_counts().to_dict()
-                st.write("PIX no extrato:")
-                for val, count in pix_counts.items():
-                    st.write(f"- R$ {val:.2f}: {count} vezes")
+            try:
+                df_ext = process_csv_extract(uploaded_file.read())
+                if not df_ext.empty:
+                    pix_counts = df_ext[df_ext['Histórico'].str.contains('PIX', na=False)]['Crédito (R$)'].value_counts().to_dict()
+                    st.write("PIX no extrato:")
+                    for val, count in pix_counts.items():
+                        st.write(f"- R$ {val:.2f}: {count} vezes")
+            except Exception as e:
+                st.error(f"Erro ao ler extrato: {e}")
 
     if st.button("🚀 Consolidar Tudo", type="primary"):
         if not players_pelada and not players_churras:
             st.error("Insira pelo menos uma lista.")
         else:
-            # Unificar listas e participações
-            all_participants = {} # Nome -> {pelada: bool, churrasco: bool}
+            all_participants = {} 
             
             for p in players_pelada:
                 all_participants[p['Nome']] = {'pelada': p['Confirmado'], 'churrasco': False}
@@ -159,30 +199,34 @@ if menu == "Lançamento Semanal":
                 else:
                     all_participants[p['Nome']] = {'pelada': False, 'churrasco': p['Confirmado']}
             
-            # Gerar registros de jogadores
             novos_regs = []
             total_arrecadado = 0
             for nome, participacao in all_participants.items():
                 pago_pelada = participacao['pelada']
                 pago_churras = participacao['churrasco']
                 
-                valor_total = (v_pelada if pago_pelada else 0) + (v_churras if pago_churras else 0)
-                total_arrecadado += valor_total
+                # Se estiver na lista mas sem check, é devedor do valor correspondente
+                valor_devido = (v_pelada if (pago_pelada or not participacao['churrasco']) else 0) # Lógica simplificada
+                # Ajuste: Se o usuário quer monitorar devedores, vamos gravar o valor total esperado
+                valor_total_esperado = (v_pelada if 'pelada' in participacao else 0) + (v_churras if participacao['churrasco'] or 'churrasco' in participacao else 0)
+                
+                # Para o caixa, só somamos o que tem check
+                valor_real_pago = (v_pelada if pago_pelada else 0) + (v_churras if pago_churras else 0)
+                total_arrecadado += valor_real_pago
                 
                 tipo = "Pelada + Churrasco" if (pago_pelada and pago_churras) else ("Pelada" if pago_pelada else "Churrasco")
-                status = "Pago" if (pago_pelada or pago_churras) else "Devedor"
+                status = "Pago" if valor_real_pago >= 20 else "Devedor" # Simplificação
                 
                 novos_regs.append({
                     "Data_Evento": pd.to_datetime(data_evento),
                     "Nome_Jogador": nome,
                     "Tipo_Participacao": tipo,
-                    "Valor_Pago": valor_total,
+                    "Valor_Pago": valor_real_pago,
                     "Status": status
                 })
             
             df_jogadores = pd.concat([df_jogadores, pd.DataFrame(novos_regs)], ignore_index=True)
             
-            # Atualizar Caixa
             ultimo_saldo = float(df_caixa["Saldo_Acumulado"].iloc[-1]) if not df_caixa.empty else 1612.0
             dt_ev = pd.to_datetime(data_evento)
             
@@ -221,7 +265,6 @@ elif menu == "Dashboard & Frequência":
     with tab_freq:
         if not df_jogadores.empty:
             st.subheader("Ranking de Presença")
-            # Conta participações por jogador
             freq = df_jogadores[df_jogadores["Status"] == "Pago"].groupby("Nome_Jogador").size().reset_index(name="Presenças")
             freq = freq.sort_values("Presenças", ascending=False)
             
