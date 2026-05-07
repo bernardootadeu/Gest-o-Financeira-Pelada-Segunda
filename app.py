@@ -1,29 +1,32 @@
 import streamlit as st
 import pandas as pd
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import io
+import plotly.express as px
 
 # Configurações de Cores e Estilo
 VERDE = "#458462"
 AMBAR = "#FFB743"
 
-st.set_page_config(page_title="Gestão Financeira Pelada", layout="wide")
+st.set_page_config(page_title="Gestão Pelada & Churrasco", layout="wide")
 
 # Funções de Carregamento de Dados
 def load_data():
     if not os.path.exists("historico_caixa.csv"):
-        df_caixa = pd.DataFrame(columns=["Data", "Descricao", "Categoria", "Tipo_Entrada_Saida", "Valor", "Saldo_Acumulado"])
+        df_caixa = pd.DataFrame(columns=["Data", "Descricao", "Categoria", "Tipo", "Valor", "Saldo_Acumulado"])
         df_caixa.to_csv("historico_caixa.csv", index=False)
     else:
         df_caixa = pd.read_csv("historico_caixa.csv")
+        df_caixa["Data"] = pd.to_datetime(df_caixa["Data"])
     
     if not os.path.exists("historico_jogadores.csv"):
-        df_jogadores = pd.DataFrame(columns=["Data_Pelada", "Nome_Jogador", "Status_Pagamento"])
+        df_jogadores = pd.DataFrame(columns=["Data_Evento", "Nome_Jogador", "Tipo_Evento", "Valor_Pago", "Status"])
         df_jogadores.to_csv("historico_jogadores.csv", index=False)
     else:
         df_jogadores = pd.read_csv("historico_jogadores.csv")
+        df_jogadores["Data_Evento"] = pd.to_datetime(df_jogadores["Data_Evento"])
         
     return df_caixa, df_jogadores
 
@@ -31,7 +34,7 @@ def save_data(df_caixa, df_jogadores):
     df_caixa.to_csv("historico_caixa.csv", index=False)
     df_jogadores.to_csv("historico_jogadores.csv", index=False)
 
-# Lógica de Processamento
+# Lógica de Processamento de Texto e CSV
 def process_whatsapp_list(text):
     lines = text.split('\n')
     players = []
@@ -49,158 +52,203 @@ def process_csv_extract(file_content):
         content = file_content.decode('utf-8', errors='ignore')
     else:
         content = file_content.read().decode('utf-8', errors='ignore')
-        
     lines = content.splitlines()
-    
     start_line = 0
     for i, line in enumerate(lines):
         if "Data;Histórico;Docto.;Crédito (R$);Débito (R$)" in line:
             start_line = i
-            if i > 5: 
-                break
-                
+            if i > 5: break
     data_content = "\n".join(lines[start_line:])
-    # Lendo com separador ';' e tratando linhas problemáticas (totais no final)
     df = pd.read_csv(io.StringIO(data_content), sep=';', on_bad_lines='skip')
     df.columns = [c.strip() for c in df.columns]
     
-    if 'Histórico' in df.columns and 'Crédito (R$)' in df.columns:
-        # Tratamento robusto para valores numéricos no formato brasileiro (ex: 1.500,00 ou 20,00)
-        def parse_br_float(val):
-            if pd.isna(val) or str(val).strip() == "": return 0.0
-            s = str(val).replace('.', '').replace(',', '.')
-            try:
-                return float(s)
-            except:
-                return 0.0
+    def parse_br_float(val):
+        if pd.isna(val) or str(val).strip() == "": return 0.0
+        return float(str(val).replace('.', '').replace(',', '.'))
 
+    if 'Crédito (R$)' in df.columns:
         df['Crédito (R$)'] = df['Crédito (R$)'].apply(parse_br_float)
-        
-        pix_payments = df[
-            (df['Histórico'].str.contains('PIX', case=False, na=False)) & 
-            (df['Crédito (R$)'] == 20.00)
-        ]
-        return len(pix_payments)
-    return 0
+        return df
+    return pd.DataFrame()
 
 # Interface
-st.title("⚽ Gestão Financeira da Pelada")
-
-tab1, tab2 = st.tabs(["Conciliador Semanal", "Dashboard & Inadimplência"])
+st.sidebar.title("⚽ Gestão da Pelada")
+menu = st.sidebar.radio("Navegação", ["Lançamento Semanal", "Dashboard & Histórico", "Configurações"])
 
 df_caixa, df_jogadores = load_data()
 
-with tab1:
-    st.header("🔄 Conciliação Semanal")
+if menu == "Lançamento Semanal":
+    st.header("🔄 Conciliação e Lançamento")
+    
+    data_evento = st.date_input("Data do Evento", datetime.now())
+    tipo_evento = st.selectbox("Tipo de Evento", ["Apenas Pelada", "Pelada + Churrasco"])
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("1. Extrato Bancário")
-        uploaded_file = st.file_uploader("Upload do CSV do Banco", type="csv")
-        num_pix = 0
-        if uploaded_file:
-            try:
-                content = uploaded_file.read()
-                num_pix = process_csv_extract(content)
-                st.success(f"Encontrados {num_pix} pagamentos de R$ 20,00 via PIX.", icon="✅")
-            except Exception as e:
-                st.error(f"Erro ao processar CSV: {e}")
+        st.subheader("1. Entradas (WhatsApp)")
+        wa_text = st.text_area("Cole a lista do WhatsApp aqui...", height=200)
+        players = process_whatsapp_list(wa_text) if wa_text else []
+        
+        if players:
+            st.info(f"{len(players)} jogadores identificados.")
+            valor_pelada = st.number_input("Valor da Pelada (R$)", value=20.0)
+            valor_churras = 0.0
+            if tipo_evento == "Pelada + Churrasco":
+                valor_churras = st.number_input("Valor Adicional Churrasco (R$)", value=5.0)
+            
+            total_por_pessoa = valor_pelada + valor_churras
+            st.write(f"**Total por pessoa confirmado: R$ {total_por_pessoa:.2f}**")
 
     with col2:
-        st.subheader("2. Lista do WhatsApp")
-        whatsapp_text = st.text_area("Cole a lista aqui...", height=150)
-        players_list = []
-        if whatsapp_text:
-            players_list = process_whatsapp_list(whatsapp_text)
-            num_confirmados = sum(1 for p in players_list if p['Confirmado'])
-            st.info(f"{len(players_list)} jogadores identificados. {num_confirmados} com check ✅.")
+        st.subheader("2. Auditoria (Opcional)")
+        uploaded_file = st.file_uploader("Upload do Extrato para conferência", type="csv")
+        pix_counts = {}
+        if uploaded_file:
+            df_extrato = process_csv_extract(uploaded_file.read())
+            if not df_extrato.empty:
+                # Conta quantos PIX de cada valor existem
+                pix_counts = df_extrato[df_extrato['Histórico'].str.contains('PIX', na=False)]['Crédito (R$)'].value_counts().to_dict()
+                st.write("PIX encontrados no extrato:")
+                for val, count in pix_counts.items():
+                    st.write(f"- R$ {val:.2f}: {count} vezes")
 
     st.divider()
     
-    if players_list:
-        st.subheader("3. Comparação e Consolidação")
-        num_confirmados = sum(1 for p in players_list if p['Confirmado'])
-        divergencia = num_confirmados - num_pix
-        
-        if divergencia == 0:
-            st.success("Tudo certo! O número de PIX bate com os checks da lista.", icon="✅")
-        elif divergencia > 0:
-            st.warning(f"Atenção: Existem {divergencia} checks a mais na lista do que PIX no extrato.", icon="⚠️")
+    st.subheader("3. Custos e Saídas")
+    c1, c2, c3 = st.columns(3)
+    aluguel = c1.number_input("Aluguel da Quadra (Fixo)", value=270.0)
+    custo_churras = 0.0
+    desc_churras = ""
+    if tipo_evento == "Pelada + Churrasco":
+        custo_churras = c2.number_input("Custos Churrasco (Carne, Carvão, etc)", value=0.0)
+        desc_churras = c3.text_input("Descrição dos custos churrasco", "Carnes e Bebidas")
+    
+    if st.button("🚀 Consolidar e Salvar Semana", type="primary"):
+        if not players:
+            st.error("Por favor, cole a lista do WhatsApp primeiro.")
         else:
-            st.info(f"Existem {abs(divergencia)} PIX a mais no extrato do que checks na lista.")
+            # 1. Processar Jogadores
+            novos_jogadores = []
+            total_arrecadado_pelada = 0
+            total_arrecadado_churras = 0
             
-        data_pelada = st.date_input("Data da Pelada", datetime.now())
-        
-        if st.button("Consolidar Semana", type="primary"):
-            novos_registros_jogadores = []
-            total_arrecadado = 0
-            for p in players_list:
-                status = "Pago" if p['Confirmado'] else "Devedor"
-                if p['Confirmado']: total_arrecadado += 20
-                novos_registros_jogadores.append({
-                    "Data_Pelada": data_pelada,
+            for p in players:
+                pago = p['Confirmado']
+                valor_pago = total_por_pessoa if pago else 0.0
+                status = "Pago" if pago else "Devedor"
+                
+                if pago:
+                    total_arrecadado_pelada += valor_pelada
+                    total_arrecadado_churras += valor_churras
+                
+                novos_jogadores.append({
+                    "Data_Evento": data_evento,
                     "Nome_Jogador": p['Nome'],
-                    "Status_Pagamento": status
+                    "Tipo_Evento": tipo_evento,
+                    "Valor_Pago": valor_pago,
+                    "Status": status
                 })
             
-            df_jogadores = pd.concat([df_jogadores, pd.DataFrame(novos_registros_jogadores)], ignore_index=True)
+            df_jogadores = pd.concat([df_jogadores, pd.DataFrame(novos_jogadores)], ignore_index=True)
             
+            # 2. Processar Caixa
             ultimo_saldo = float(df_caixa["Saldo_Acumulado"].iloc[-1]) if not df_caixa.empty else 1612.0
+            novos_lancamentos = []
             
-            novo_saldo = ultimo_saldo + total_arrecadado
-            entrada_row = {
-                "Data": data_pelada,
-                "Descricao": f"Arrecadação Pelada {data_pelada}",
-                "Categoria": "Pelada",
-                "Tipo_Entrada_Saida": "Entrada",
-                "Valor": total_arrecadado,
-                "Saldo_Acumulado": novo_saldo
-            }
+            # Entrada Pelada
+            ultimo_saldo += total_arrecadado_pelada
+            novos_lancamentos.append({"Data": data_evento, "Descricao": f"Arrecadação Pelada", "Categoria": "Pelada", "Tipo": "Entrada", "Valor": total_arrecadado_pelada, "Saldo_Acumulado": ultimo_saldo})
             
-            novo_saldo -= 270
-            saida_row = {
-                "Data": data_pelada,
-                "Descricao": "Aluguel da Quadra",
-                "Categoria": "Custo Fixo",
-                "Tipo_Entrada_Saida": "Saída",
-                "Valor": 270,
-                "Saldo_Acumulado": novo_saldo
-            }
+            # Entrada Churrasco
+            if total_arrecadado_churras > 0:
+                ultimo_saldo += total_arrecadado_churras
+                novos_lancamentos.append({"Data": data_evento, "Descricao": f"Arrecadação Churrasco", "Categoria": "Churrasco", "Tipo": "Entrada", "Valor": total_arrecadado_churras, "Saldo_Acumulado": ultimo_saldo})
             
-            df_caixa = pd.concat([df_caixa, pd.DataFrame([entrada_row, saida_row])], ignore_index=True)
+            # Saída Aluguel
+            ultimo_saldo -= aluguel
+            novos_lancamentos.append({"Data": data_evento, "Descricao": "Aluguel Quadra", "Categoria": "Fixo", "Tipo": "Saída", "Valor": aluguel, "Saldo_Acumulado": ultimo_saldo})
+            
+            # Saída Churrasco
+            if custo_churras > 0:
+                ultimo_saldo -= custo_churras
+                novos_lancamentos.append({"Data": data_evento, "Descricao": desc_churras, "Categoria": "Churrasco", "Tipo": "Saída", "Valor": custo_churras, "Saldo_Acumulado": ultimo_saldo})
+            
+            df_caixa = pd.concat([df_caixa, pd.DataFrame(novos_lancamentos)], ignore_index=True)
             
             save_data(df_caixa, df_jogadores)
             st.balloons()
-            st.success("Dados consolidados com sucesso!")
+            st.success("Semana consolidada com sucesso!")
 
-with tab2:
-    st.header("📊 Dashboard Anual")
+elif menu == "Dashboard & Histórico":
+    st.header("📊 Monitoramento Financeiro")
+    
+    periodo = st.radio("Visão Temporal", ["Semanal", "Anual"], horizontal=True)
     
     if not df_caixa.empty:
-        df_caixa["Valor"] = pd.to_numeric(df_caixa["Valor"])
-        df_caixa["Saldo_Acumulado"] = pd.to_numeric(df_caixa["Saldo_Acumulado"])
-        
-        saldo_atual = df_caixa["Saldo_Acumulado"].iloc[-1]
-        total_arrecadado_ano = df_caixa[df_caixa["Tipo_Entrada_Saida"] == "Entrada"]["Valor"].sum()
-        
-        devedores_df = df_jogadores[df_jogadores["Status_Pagamento"] == "Devedor"]
-        divida_ativa = len(devedores_df) * 20
-        
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Saldo Atual", f"R$ {saldo_atual:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        m2.metric("Total Arrecadado (Ano)", f"R$ {total_arrecadado_ano:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        m3.metric("Dívida Ativa", f"R$ {divida_ativa:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), delta_color="inverse")
-        
-        st.subheader("Evolução do Saldo")
-        st.line_chart(df_caixa.set_index("Data")["Saldo_Acumulado"])
-        
-        st.subheader("📋 Tabela de Devedores")
-        if not devedores_df.empty:
-            resumo_devedores = devedores_df.groupby("Nome_Jogador").size().reset_index(name="Qtd_Dividas")
-            resumo_devedores["Total_Devido"] = resumo_devedores["Qtd_Dividas"] * 20
-            st.table(resumo_devedores.sort_values("Total_Devido", ascending=False))
+        if periodo == "Semanal":
+            # Pegar última semana disponível
+            ultima_data = df_caixa["Data"].max()
+            df_filtrado = df_caixa[df_caixa["Data"] == ultima_data]
+            st.subheader(f"Resumo da Semana: {ultima_data.strftime('%d/%m/%Y')}")
         else:
-            st.write("Nenhum devedor encontrado. Ótima notícia!")
-    else:
-        st.info("Aguardando dados para exibir o dashboard.")
+            ano_atual = datetime.now().year
+            df_filtrado = df_caixa[df_caixa["Data"].dt.year == ano_atual]
+            st.subheader(f"Resumo do Ano: {ano_atual}")
+
+        # Métricas
+        entradas = df_filtrado[df_filtrado["Tipo"] == "Entrada"]["Valor"].sum()
+        saidas = df_filtrado[df_filtrado["Tipo"] == "Saída"]["Valor"].sum()
+        saldo_periodo = entradas - saidas
+        saldo_total = df_caixa["Saldo_Acumulado"].iloc[-1]
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Entradas no Período", f"R$ {entradas:,.2f}")
+        m2.metric("Saídas no Período", f"R$ {saidas:,.2f}")
+        m3.metric("Saldo do Período", f"R$ {saldo_periodo:,.2f}")
+        m4.metric("Saldo Total em Conta", f"R$ {saldo_total:,.2f}", delta=f"{saldo_periodo:,.2f}")
+
+        # Gráficos
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.write("**Evolução do Saldo**")
+            fig_saldo = px.line(df_caixa, x="Data", y="Saldo_Acumulado", title="Fluxo de Caixa Acumulado")
+            st.plotly_chart(fig_saldo, use_container_width=True)
+        
+        with col_g2:
+            st.write("**Distribuição de Gastos**")
+            df_gastos = df_caixa[df_caixa["Tipo"] == "Saída"].groupby("Categoria")["Valor"].sum().reset_index()
+            fig_pizza = px.pie(df_gastos, values='Valor', names='Categoria', hole=.3)
+            st.plotly_chart(fig_pizza, use_container_width=True)
+
+        # Devedores
+        st.divider()
+        st.subheader("⚠️ Controle de Inadimplência")
+        devedores = df_jogadores[df_jogadores["Status"] == "Devedor"]
+        if not devedores.empty:
+            resumo_dev = devedores.groupby("Nome_Jogador").agg(
+                Total_Devido=('Valor_Pago', lambda x: 0), # Placeholder
+                Vezes_Devedor=('Status', 'count')
+            ).reset_index()
+            # Como o valor varia, vamos estimar pelo valor padrão da pelada se não estiver gravado
+            resumo_dev["Estimativa_Divida"] = resumo_dev["Vezes_Devedor"] * 20
+            st.dataframe(resumo_dev.sort_values("Vezes_Devedor", ascending=False), use_container_width=True)
+        else:
+            st.success("Ninguém devendo! Todos os pagamentos em dia.")
+
+        st.divider()
+        st.subheader("📜 Histórico de Movimentações")
+        st.dataframe(df_caixa.sort_values("Data", ascending=False), use_container_width=True)
+
+elif menu == "Configurações":
+    st.header("⚙️ Configurações do Sistema")
+    st.write("Aqui você pode resetar os dados ou exportar os backups.")
+    
+    if st.button("Limpar Histórico (Cuidado!)"):
+        if st.checkbox("Confirmo que quero apagar todos os dados"):
+            os.remove("historico_caixa.csv")
+            os.remove("historico_jogadores.csv")
+            st.warning("Dados apagados. Recarregue a página.")
+    
+    st.download_button("Baixar Backup Caixa (CSV)", df_caixa.to_csv(index=False), "caixa.csv")
+    st.download_button("Baixar Backup Jogadores (CSV)", df_jogadores.to_csv(index=False), "jogadores.csv")
