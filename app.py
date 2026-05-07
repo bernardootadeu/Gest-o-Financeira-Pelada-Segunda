@@ -3,6 +3,7 @@ import pandas as pd
 import re
 from datetime import datetime
 import os
+import io
 
 # Configurações de Cores e Estilo
 VERDE = "#458462"
@@ -32,13 +33,10 @@ def save_data(df_caixa, df_jogadores):
 
 # Lógica de Processamento
 def process_whatsapp_list(text):
-    # Regex para pegar nomes e verificar se tem o check ✅
-    # Exemplo de linha: 1. João Silva ✅ ou 2. Maria Oliveira
     lines = text.split('\n')
     players = []
     for line in lines:
         if line.strip():
-            # Remove numeração inicial (ex: "1. ", "01 - ")
             clean_line = re.sub(r'^\d+[\s\.\-\)]*', '', line).strip()
             has_check = "✅" in clean_line
             name = clean_line.replace("✅", "").strip()
@@ -46,15 +44,44 @@ def process_whatsapp_list(text):
                 players.append({"Nome": name, "Confirmado": has_check})
     return players
 
-def process_csv_extract(file):
-    df = pd.read_csv(file)
-    # Filtra lançamentos com "PIX" e valor de 20.00
-    # Assume-se que as colunas típicas de extrato existam ou tenta-se inferir
-    # Para este exemplo, vamos procurar por colunas que contenham 'Descricao' e 'Valor'
-    # Se não encontrar, assume-se um formato padrão simplificado
-    pix_payments = df[(df.apply(lambda row: row.astype(str).str.contains('PIX', case=False).any(), axis=1)) & 
-                      (df.apply(lambda row: (row == 20.00) | (row == '20,00'), axis=1).any(axis=1))]
-    return len(pix_payments)
+def process_csv_extract(file_content):
+    if isinstance(file_content, bytes):
+        content = file_content.decode('utf-8', errors='ignore')
+    else:
+        content = file_content.read().decode('utf-8', errors='ignore')
+        
+    lines = content.splitlines()
+    
+    start_line = 0
+    for i, line in enumerate(lines):
+        if "Data;Histórico;Docto.;Crédito (R$);Débito (R$)" in line:
+            start_line = i
+            if i > 5: 
+                break
+                
+    data_content = "\n".join(lines[start_line:])
+    # Lendo com separador ';' e tratando linhas problemáticas (totais no final)
+    df = pd.read_csv(io.StringIO(data_content), sep=';', on_bad_lines='skip')
+    df.columns = [c.strip() for c in df.columns]
+    
+    if 'Histórico' in df.columns and 'Crédito (R$)' in df.columns:
+        # Tratamento robusto para valores numéricos no formato brasileiro (ex: 1.500,00 ou 20,00)
+        def parse_br_float(val):
+            if pd.isna(val) or str(val).strip() == "": return 0.0
+            s = str(val).replace('.', '').replace(',', '.')
+            try:
+                return float(s)
+            except:
+                return 0.0
+
+        df['Crédito (R$)'] = df['Crédito (R$)'].apply(parse_br_float)
+        
+        pix_payments = df[
+            (df['Histórico'].str.contains('PIX', case=False, na=False)) & 
+            (df['Crédito (R$)'] == 20.00)
+        ]
+        return len(pix_payments)
+    return 0
 
 # Interface
 st.title("⚽ Gestão Financeira da Pelada")
@@ -74,7 +101,8 @@ with tab1:
         num_pix = 0
         if uploaded_file:
             try:
-                num_pix = process_csv_extract(uploaded_file)
+                content = uploaded_file.read()
+                num_pix = process_csv_extract(content)
                 st.success(f"Encontrados {num_pix} pagamentos de R$ 20,00 via PIX.", icon="✅")
             except Exception as e:
                 st.error(f"Erro ao processar CSV: {e}")
@@ -105,7 +133,6 @@ with tab1:
         data_pelada = st.date_input("Data da Pelada", datetime.now())
         
         if st.button("Consolidar Semana", type="primary"):
-            # 1. Registrar Entradas dos Jogadores
             novos_registros_jogadores = []
             total_arrecadado = 0
             for p in players_list:
@@ -119,10 +146,8 @@ with tab1:
             
             df_jogadores = pd.concat([df_jogadores, pd.DataFrame(novos_registros_jogadores)], ignore_index=True)
             
-            # 2. Atualizar Caixa (Entrada Total e Saída Aluguel)
             ultimo_saldo = float(df_caixa["Saldo_Acumulado"].iloc[-1]) if not df_caixa.empty else 1612.0
             
-            # Registro de Entrada
             novo_saldo = ultimo_saldo + total_arrecadado
             entrada_row = {
                 "Data": data_pelada,
@@ -133,7 +158,6 @@ with tab1:
                 "Saldo_Acumulado": novo_saldo
             }
             
-            # Registro de Saída (Aluguel)
             novo_saldo -= 270
             saida_row = {
                 "Data": data_pelada,
@@ -154,10 +178,12 @@ with tab2:
     st.header("📊 Dashboard Anual")
     
     if not df_caixa.empty:
+        df_caixa["Valor"] = pd.to_numeric(df_caixa["Valor"])
+        df_caixa["Saldo_Acumulado"] = pd.to_numeric(df_caixa["Saldo_Acumulado"])
+        
         saldo_atual = df_caixa["Saldo_Acumulado"].iloc[-1]
         total_arrecadado_ano = df_caixa[df_caixa["Tipo_Entrada_Saida"] == "Entrada"]["Valor"].sum()
         
-        # Dívida Ativa
         devedores_df = df_jogadores[df_jogadores["Status_Pagamento"] == "Devedor"]
         divida_ativa = len(devedores_df) * 20
         
