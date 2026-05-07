@@ -12,20 +12,40 @@ AMBAR = "#FFB743"
 
 st.set_page_config(page_title="Gestão Pelada & Churrasco", layout="wide")
 
-# Funções de Carregamento de Dados
+# Funções de Carregamento de Dados com Migração Automática
 def load_data():
+    # 1. Carregar Histórico de Caixa
     if not os.path.exists("historico_caixa.csv"):
         df_caixa = pd.DataFrame(columns=["Data", "Descricao", "Categoria", "Tipo", "Valor", "Saldo_Acumulado"])
         df_caixa.to_csv("historico_caixa.csv", index=False)
     else:
         df_caixa = pd.read_csv("historico_caixa.csv")
+        # Padronizar nomes de colunas antigos se necessário
+        if "Tipo_Entrada_Saida" in df_caixa.columns:
+            df_caixa = df_caixa.rename(columns={"Tipo_Entrada_Saida": "Tipo"})
         df_caixa["Data"] = pd.to_datetime(df_caixa["Data"])
     
+    # 2. Carregar Histórico de Jogadores
     if not os.path.exists("historico_jogadores.csv"):
         df_jogadores = pd.DataFrame(columns=["Data_Evento", "Nome_Jogador", "Tipo_Evento", "Valor_Pago", "Status"])
         df_jogadores.to_csv("historico_jogadores.csv", index=False)
     else:
         df_jogadores = pd.read_csv("historico_jogadores.csv")
+        
+        # Migração de colunas da versão 1 para a versão 2
+        rename_map = {
+            "Data_Pelada": "Data_Evento",
+            "Status_Pagamento": "Status"
+        }
+        df_jogadores = df_jogadores.rename(columns=rename_map)
+        
+        # Adicionar colunas faltantes se for arquivo antigo
+        if "Tipo_Evento" not in df_jogadores.columns:
+            df_jogadores["Tipo_Evento"] = "Apenas Pelada"
+        if "Valor_Pago" not in df_jogadores.columns:
+            # Assume R$ 20 para registros antigos que estão como "Pago"
+            df_jogadores["Valor_Pago"] = df_jogadores["Status"].apply(lambda x: 20.0 if x == "Pago" else 0.0)
+            
         df_jogadores["Data_Evento"] = pd.to_datetime(df_jogadores["Data_Evento"])
         
     return df_caixa, df_jogadores
@@ -105,13 +125,15 @@ if menu == "Lançamento Semanal":
         uploaded_file = st.file_uploader("Upload do Extrato para conferência", type="csv")
         pix_counts = {}
         if uploaded_file:
-            df_extrato = process_csv_extract(uploaded_file.read())
-            if not df_extrato.empty:
-                # Conta quantos PIX de cada valor existem
-                pix_counts = df_extrato[df_extrato['Histórico'].str.contains('PIX', na=False)]['Crédito (R$)'].value_counts().to_dict()
-                st.write("PIX encontrados no extrato:")
-                for val, count in pix_counts.items():
-                    st.write(f"- R$ {val:.2f}: {count} vezes")
+            try:
+                df_extrato = process_csv_extract(uploaded_file.read())
+                if not df_extrato.empty:
+                    pix_counts = df_extrato[df_extrato['Histórico'].str.contains('PIX', na=False)]['Crédito (R$)'].value_counts().to_dict()
+                    st.write("PIX encontrados no extrato:")
+                    for val, count in pix_counts.items():
+                        st.write(f"- R$ {val:.2f}: {count} vezes")
+            except Exception as e:
+                st.error(f"Erro ao ler extrato: {e}")
 
     st.divider()
     
@@ -128,7 +150,6 @@ if menu == "Lançamento Semanal":
         if not players:
             st.error("Por favor, cole a lista do WhatsApp primeiro.")
         else:
-            # 1. Processar Jogadores
             novos_jogadores = []
             total_arrecadado_pelada = 0
             total_arrecadado_churras = 0
@@ -152,27 +173,25 @@ if menu == "Lançamento Semanal":
             
             df_jogadores = pd.concat([df_jogadores, pd.DataFrame(novos_jogadores)], ignore_index=True)
             
-            # 2. Processar Caixa
             ultimo_saldo = float(df_caixa["Saldo_Acumulado"].iloc[-1]) if not df_caixa.empty else 1612.0
             novos_lancamentos = []
             
-            # Entrada Pelada
-            ultimo_saldo += total_arrecadado_pelada
-            novos_lancamentos.append({"Data": data_evento, "Descricao": f"Arrecadação Pelada", "Categoria": "Pelada", "Tipo": "Entrada", "Valor": total_arrecadado_pelada, "Saldo_Acumulado": ultimo_saldo})
+            # Converter data_evento para datetime64[ns] para compatibilidade com o CSV
+            dt_evento = pd.to_datetime(data_evento)
             
-            # Entrada Churrasco
+            ultimo_saldo += total_arrecadado_pelada
+            novos_lancamentos.append({"Data": dt_evento, "Descricao": f"Arrecadação Pelada", "Categoria": "Pelada", "Tipo": "Entrada", "Valor": total_arrecadado_pelada, "Saldo_Acumulado": ultimo_saldo})
+            
             if total_arrecadado_churras > 0:
                 ultimo_saldo += total_arrecadado_churras
-                novos_lancamentos.append({"Data": data_evento, "Descricao": f"Arrecadação Churrasco", "Categoria": "Churrasco", "Tipo": "Entrada", "Valor": total_arrecadado_churras, "Saldo_Acumulado": ultimo_saldo})
+                novos_lancamentos.append({"Data": dt_evento, "Descricao": f"Arrecadação Churrasco", "Categoria": "Churrasco", "Tipo": "Entrada", "Valor": total_arrecadado_churras, "Saldo_Acumulado": ultimo_saldo})
             
-            # Saída Aluguel
             ultimo_saldo -= aluguel
-            novos_lancamentos.append({"Data": data_evento, "Descricao": "Aluguel Quadra", "Categoria": "Fixo", "Tipo": "Saída", "Valor": aluguel, "Saldo_Acumulado": ultimo_saldo})
+            novos_lancamentos.append({"Data": dt_evento, "Descricao": "Aluguel Quadra", "Categoria": "Fixo", "Tipo": "Saída", "Valor": aluguel, "Saldo_Acumulado": ultimo_saldo})
             
-            # Saída Churrasco
             if custo_churras > 0:
                 ultimo_saldo -= custo_churras
-                novos_lancamentos.append({"Data": data_evento, "Descricao": desc_churras, "Categoria": "Churrasco", "Tipo": "Saída", "Valor": custo_churras, "Saldo_Acumulado": ultimo_saldo})
+                novos_lancamentos.append({"Data": dt_evento, "Descricao": desc_churras, "Categoria": "Churrasco", "Tipo": "Saída", "Valor": custo_churras, "Saldo_Acumulado": ultimo_saldo})
             
             df_caixa = pd.concat([df_caixa, pd.DataFrame(novos_lancamentos)], ignore_index=True)
             
@@ -183,11 +202,10 @@ if menu == "Lançamento Semanal":
 elif menu == "Dashboard & Histórico":
     st.header("📊 Monitoramento Financeiro")
     
-    periodo = st.radio("Visão Temporal", ["Semanal", "Anual"], horizontal=True)
-    
     if not df_caixa.empty:
+        periodo = st.radio("Visão Temporal", ["Semanal", "Anual"], horizontal=True)
+        
         if periodo == "Semanal":
-            # Pegar última semana disponível
             ultima_data = df_caixa["Data"].max()
             df_filtrado = df_caixa[df_caixa["Data"] == ultima_data]
             st.subheader(f"Resumo da Semana: {ultima_data.strftime('%d/%m/%Y')}")
@@ -196,7 +214,6 @@ elif menu == "Dashboard & Histórico":
             df_filtrado = df_caixa[df_caixa["Data"].dt.year == ano_atual]
             st.subheader(f"Resumo do Ano: {ano_atual}")
 
-        # Métricas
         entradas = df_filtrado[df_filtrado["Tipo"] == "Entrada"]["Valor"].sum()
         saidas = df_filtrado[df_filtrado["Tipo"] == "Saída"]["Valor"].sum()
         saldo_periodo = entradas - saidas
@@ -208,7 +225,6 @@ elif menu == "Dashboard & Histórico":
         m3.metric("Saldo do Período", f"R$ {saldo_periodo:,.2f}")
         m4.metric("Saldo Total em Conta", f"R$ {saldo_total:,.2f}", delta=f"{saldo_periodo:,.2f}")
 
-        # Gráficos
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             st.write("**Evolução do Saldo**")
@@ -218,19 +234,19 @@ elif menu == "Dashboard & Histórico":
         with col_g2:
             st.write("**Distribuição de Gastos**")
             df_gastos = df_caixa[df_caixa["Tipo"] == "Saída"].groupby("Categoria")["Valor"].sum().reset_index()
-            fig_pizza = px.pie(df_gastos, values='Valor', names='Categoria', hole=.3)
-            st.plotly_chart(fig_pizza, use_container_width=True)
+            if not df_gastos.empty:
+                fig_pizza = px.pie(df_gastos, values='Valor', names='Categoria', hole=.3)
+                st.plotly_chart(fig_pizza, use_container_width=True)
+            else:
+                st.write("Sem saídas registradas no período.")
 
-        # Devedores
         st.divider()
         st.subheader("⚠️ Controle de Inadimplência")
         devedores = df_jogadores[df_jogadores["Status"] == "Devedor"]
         if not devedores.empty:
             resumo_dev = devedores.groupby("Nome_Jogador").agg(
-                Total_Devido=('Valor_Pago', lambda x: 0), # Placeholder
                 Vezes_Devedor=('Status', 'count')
             ).reset_index()
-            # Como o valor varia, vamos estimar pelo valor padrão da pelada se não estiver gravado
             resumo_dev["Estimativa_Divida"] = resumo_dev["Vezes_Devedor"] * 20
             st.dataframe(resumo_dev.sort_values("Vezes_Devedor", ascending=False), use_container_width=True)
         else:
@@ -239,6 +255,8 @@ elif menu == "Dashboard & Histórico":
         st.divider()
         st.subheader("📜 Histórico de Movimentações")
         st.dataframe(df_caixa.sort_values("Data", ascending=False), use_container_width=True)
+    else:
+        st.info("Aguardando dados para exibir o dashboard.")
 
 elif menu == "Configurações":
     st.header("⚙️ Configurações do Sistema")
@@ -246,9 +264,11 @@ elif menu == "Configurações":
     
     if st.button("Limpar Histórico (Cuidado!)"):
         if st.checkbox("Confirmo que quero apagar todos os dados"):
-            os.remove("historico_caixa.csv")
-            os.remove("historico_jogadores.csv")
+            if os.path.exists("historico_caixa.csv"): os.remove("historico_caixa.csv")
+            if os.path.exists("historico_jogadores.csv"): os.remove("historico_jogadores.csv")
             st.warning("Dados apagados. Recarregue a página.")
     
-    st.download_button("Baixar Backup Caixa (CSV)", df_caixa.to_csv(index=False), "caixa.csv")
-    st.download_button("Baixar Backup Jogadores (CSV)", df_jogadores.to_csv(index=False), "jogadores.csv")
+    if not df_caixa.empty:
+        st.download_button("Baixar Backup Caixa (CSV)", df_caixa.to_csv(index=False), "caixa.csv")
+    if not df_jogadores.empty:
+        st.download_button("Baixar Backup Jogadores (CSV)", df_jogadores.to_csv(index=False), "jogadores.csv")
